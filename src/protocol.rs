@@ -92,7 +92,7 @@ pub struct AugmentRequest {
   pub conversation_id: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct AugmentChatHistory {
   #[serde(default, deserialize_with = "de_null_as_default")]
   #[serde(alias = "responseText", alias = "response", alias = "text")]
@@ -147,7 +147,7 @@ pub struct ToolDefinition {
   pub mcp_tool_name: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct NodeIn {
   pub id: i32,
   #[serde(rename = "type")]

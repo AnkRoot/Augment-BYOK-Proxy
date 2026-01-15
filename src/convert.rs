@@ -1402,6 +1402,9 @@ fn format_file_node_for_prompt(v: &Value) -> String {
 }
 
 fn format_history_summary_for_prompt(v: &Value) -> String {
+  if let Some(rendered) = crate::history_summary::render_history_summary_node_value(v, &[]) {
+    return rendered;
+  }
   let Some(h) = v.as_object() else {
     return String::new();
   };

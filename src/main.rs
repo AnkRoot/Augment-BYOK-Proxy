@@ -1,6 +1,8 @@
 mod anthropic;
 mod config;
 mod convert;
+mod history_summary;
+mod history_summary_auto;
 mod openai;
 mod protocol;
 
@@ -30,6 +32,8 @@ use crate::{
     clean_model, convert_augment_to_anthropic, convert_augment_to_openai_compatible,
     AnthropicStreamState, OpenAIStreamState,
   },
+  history_summary::compact_chat_history,
+  history_summary_auto::{maybe_summarize_and_compact, HistorySummaryCache},
   openai::OpenAIChatCompletionChunk,
   protocol::{error_response, probe_response, AugmentRequest, AugmentStreamChunk},
 };
@@ -83,6 +87,7 @@ struct AppState {
   cfg: Arc<RwLock<Config>>,
   http: reqwest::Client,
   models_cache: Arc<RwLock<ModelCache>>,
+  history_summary_cache: Arc<RwLock<HistorySummaryCache>>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -120,6 +125,7 @@ async fn main() -> anyhow::Result<()> {
     cfg: Arc::new(RwLock::new(cfg)),
     http,
     models_cache: Arc::new(RwLock::new(ModelCache::default())),
+    history_summary_cache: Arc::new(RwLock::new(HistorySummaryCache::default())),
   };
 
   let app = Router::new()
@@ -269,17 +275,13 @@ async fn chat_stream(
     debug!(len = body.len(), "chat-stream 请求");
   }
 
-  let augment = match parse_augment_request(&body) {
+  let mut augment = match parse_augment_request(&body) {
     Ok(v) => v,
     Err(err) => {
       error!(error=%err, len=body.len(), body=%format_chat_stream_body_for_log(&body), "chat-stream 请求解析失败");
       return ndjson_response(error_response(format!("⚠️ 请求解析失败: {err}")));
     }
   };
-
-  if augment.message.is_empty() && augment.chat_history.is_empty() {
-    return ndjson_response(probe_response());
-  }
 
   let header_model = headers
     .get("x-byok-model")
@@ -317,6 +319,28 @@ async fn chat_stream(
       (p, model)
     }
   };
+
+  let model_for_trigger = match provider {
+    ProviderRef::Anthropic(_) => clean_model(&raw_model),
+    ProviderRef::OpenAICompatible(_) => raw_model.trim().to_string(),
+  };
+
+  compact_chat_history(&mut augment.chat_history);
+  if let Err(err) = maybe_summarize_and_compact(
+    &state.http,
+    &cfg,
+    &state.history_summary_cache,
+    model_for_trigger.as_str(),
+    &mut augment,
+  )
+  .await
+  {
+    warn!(error=%err, "history_summary 自动摘要失败（已忽略，继续使用原始 chat_history）");
+  }
+
+  if augment.message.is_empty() && augment.chat_history.is_empty() {
+    return ndjson_response(probe_response());
+  }
 
   let tool_meta_by_name: std::collections::HashMap<String, (String, String)> = augment
     .tool_definitions

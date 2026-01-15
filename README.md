@@ -34,7 +34,7 @@
   - 主面板 Model Picker 的候选模型来自本代理 `/get-models` 注入的 `byok:<providerId>:<modelId>`。
   - `/chat-stream` 会解析请求体 `model` 的 byok 格式，锁定 provider + modelId；若未指定则使用 `byok.active_provider_id/byok.providers[0]` 的 `default_model`。
 - 请求兼容：支持 `chat_history` 还原上下文；支持工具调用（`tool_use/tool_result` 串联）；输入 nodes 支持 `type=0` text、`type=1` tool_result（支持 `content_nodes` 文本/图片）、`type=2` image(base64)，以及 `type=3..10`（会转为提示文本）。
-- 上下文压缩（可选）：`history_summary.enabled=true` 时，代理会在 `chat_history` 接近上下文上限时自动触发（`trigger_strategy=auto|chars|ratio`），用 `history_summary.provider_id/model` 专用摘要模型做滚动摘要（`rolling_summary=true` 时增量更新），并把旧 history 压成一段 `<supervisor>...` 总结后裁剪（client 无感；会增加一次上游调用延迟；依赖请求体 `conversationId` 做缓存复用）。
+- 上下文压缩（可选）：`history_summary.enabled=true` 时，代理会在 `chat_history` 接近上下文上限时自动触发（`trigger_strategy=auto|chars|ratio`），用 `history_summary.provider_id/model` 专用摘要模型做滚动摘要（`rolling_summary=true` 时增量更新），并把旧 history 压成一段 `<supervisor>...` 总结后裁剪（client 无感；会增加一次上游调用延迟；依赖请求体 `conversationId` 做缓存复用）。如需连「client→proxy」也不再传全量 history，可在注入版 VSIX 上开启 `history_summary.client_compaction_enabled=true`。
 - 请求解析：显式 `null` 的字符串字段按缺省值处理；解析失败错误会附带 JSON 字段路径（便于定位是哪一个字段触发 `null → string`）。
 - 日志：`logging.filter` 控制过滤；`logging.dump_chat_stream_body=true` 输出已脱敏请求摘要（不截断；仍可能包含代码片段）；请求解析失败时会额外输出该摘要用于排查。
 - 扩展隐藏配置 `augment.advanced.chat.override.*` 仅进入请求体 `third_party_override`（不会直接改变请求 URL）。
