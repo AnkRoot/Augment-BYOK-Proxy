@@ -26,7 +26,6 @@
 ## 关键行为
 
 - `proxy.auth_token` 是 VS Code 连接本代理的鉴权 token（对应 `augment.advanced.apiToken`）。
-- 对话过长自动压缩：启用 `proxy.history_compression` 后，当 `chat_history` 估算字符数超过阈值会自动裁剪仅保留尾部，并把“摘要/提示”注入 `prefix`（system）；配置了 `summary_prompt` 时会额外向上游发起一次非流式摘要请求（按 `conversation_id` 缓存）。
 - `official.base_url` 视为完整 API 前缀，不补/抽/猜 `/api`/`/v1`；所有未实现端点全部透传到 `${official.base_url}<path>`。
 - `official.api_token` 仅由 Rust 使用：用于请求官方 `/get-models` + 其它端点反代（不会暴露给 VS Code；支持 raw token / Bearer / KEY=VALUE）。
 - `byok.providers[type=anthropic].base_url` 必须是完整 Anthropic API 前缀（例 `https://api.anthropic.com/v1`），内部严格拼接 `${base_url}/messages`（不猜 `/v1`；自动补齐 `/`）。

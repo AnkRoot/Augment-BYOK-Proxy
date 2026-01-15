@@ -9,21 +9,6 @@ server:
 proxy:
   # VS Code 设置：augment.advanced.apiToken（用于连接本代理的鉴权 token，不是 LLM key）
   auth_token: "proxy_your_auth_token"
-  # 可选：对话历史自动压缩（防止上下文过长导致上游报错/拒绝）
-  history_compression:
-    enabled: false
-    # 触发阈值：估算 chat_history 字符数超过即触发（字符数≈粗略 token 代理；按模型上下文自行调参）
-    trigger_on_history_size_chars: 120000
-    # 保留尾部：压缩后仍保留最近 N 字符的对话历史（建议 30000~60000）
-    history_tail_size_chars_to_keep: 40000
-    # 可选：摘要提示词；为空则只裁剪不摘要（更省钱/更快，但会丢早期关键信息）
-    summary_prompt: "把被省略的对话历史压缩成可用于继续对话的高密度摘要：覆盖目标/约束/结论/决定/待办/关键代码点(含文件路径与命令)/已知错误与原因；保留专有名词与数值；不要虚构。"
-    # 摘要请求的输出上限（max_tokens），以及摘要文本本身的字符上限（避免 summary 反向撑爆上下文）
-    summary_max_tokens: 800
-    summary_max_chars: 6000
-    # 摘要缓存：按 conversation_id 复用（没有 conversation_id 则不缓存），并按 TTL/最大条目数淘汰
-    cache_ttl_seconds: 3600
-    max_cache_entries: 256
 
 official:
   # Augment 官方 completionURL（严格语义：视为完整 API 前缀，不补/抽/猜）

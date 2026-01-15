@@ -24,38 +24,6 @@ fn default_timeout_seconds() -> u64 {
   120
 }
 
-fn default_history_compression_enabled() -> bool {
-  false
-}
-
-fn default_history_compression_trigger_chars() -> usize {
-  0
-}
-
-fn default_history_compression_tail_chars() -> usize {
-  40_000
-}
-
-fn default_history_compression_summary_prompt() -> String {
-  "".to_string()
-}
-
-fn default_history_compression_summary_max_tokens() -> u32 {
-  800
-}
-
-fn default_history_compression_summary_max_chars() -> usize {
-  6_000
-}
-
-fn default_history_compression_cache_ttl_seconds() -> u64 {
-  3600
-}
-
-fn default_history_compression_max_cache_entries() -> usize {
-  256
-}
-
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
   pub server: ServerConfig,
@@ -84,68 +52,12 @@ impl ServerConfig {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ProxyConfig {
   pub auth_token: String,
-  #[serde(default)]
-  pub history_compression: HistoryCompressionConfig,
 }
 
 impl ProxyConfig {
   pub fn validate(&self) -> anyhow::Result<()> {
     if self.auth_token.trim().is_empty() {
       anyhow::bail!("proxy.auth_token 不能为空");
-    }
-    self.history_compression.validate()?;
-    Ok(())
-  }
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct HistoryCompressionConfig {
-  #[serde(default = "default_history_compression_enabled")]
-  pub enabled: bool,
-  #[serde(default = "default_history_compression_trigger_chars")]
-  pub trigger_on_history_size_chars: usize,
-  #[serde(default = "default_history_compression_tail_chars")]
-  pub history_tail_size_chars_to_keep: usize,
-  #[serde(default = "default_history_compression_summary_prompt")]
-  pub summary_prompt: String,
-  #[serde(default = "default_history_compression_summary_max_tokens")]
-  pub summary_max_tokens: u32,
-  #[serde(default = "default_history_compression_summary_max_chars")]
-  pub summary_max_chars: usize,
-  #[serde(default = "default_history_compression_cache_ttl_seconds")]
-  pub cache_ttl_seconds: u64,
-  #[serde(default = "default_history_compression_max_cache_entries")]
-  pub max_cache_entries: usize,
-}
-
-impl Default for HistoryCompressionConfig {
-  fn default() -> Self {
-    Self {
-      enabled: default_history_compression_enabled(),
-      trigger_on_history_size_chars: default_history_compression_trigger_chars(),
-      history_tail_size_chars_to_keep: default_history_compression_tail_chars(),
-      summary_prompt: default_history_compression_summary_prompt(),
-      summary_max_tokens: default_history_compression_summary_max_tokens(),
-      summary_max_chars: default_history_compression_summary_max_chars(),
-      cache_ttl_seconds: default_history_compression_cache_ttl_seconds(),
-      max_cache_entries: default_history_compression_max_cache_entries(),
-    }
-  }
-}
-
-impl HistoryCompressionConfig {
-  pub fn validate(&self) -> anyhow::Result<()> {
-    if !self.enabled {
-      return Ok(());
-    }
-    if self.trigger_on_history_size_chars == 0 {
-      anyhow::bail!("proxy.history_compression.enabled=true 时，trigger_on_history_size_chars 不能为 0（或关闭 enabled）");
-    }
-    if self.summary_max_tokens == 0 {
-      anyhow::bail!("proxy.history_compression.summary_max_tokens 不能为 0");
-    }
-    if self.summary_max_chars == 0 {
-      anyhow::bail!("proxy.history_compression.summary_max_chars 不能为 0");
     }
     Ok(())
   }
