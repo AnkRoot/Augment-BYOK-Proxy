@@ -351,17 +351,24 @@ impl Default for ThinkingConfig {
 impl Config {
   pub fn load(path: &Path) -> anyhow::Result<Self> {
     let bytes = fs::read(path).with_context(|| format!("读取配置失败: {}", path.display()))?;
-    let config: Self =
+    let mut config: Self =
       serde_yaml::from_slice(&bytes).context("解析 YAML 配置失败 (config.yaml)")?;
+    config.apply_defaults();
     config.validate()?;
     Ok(config)
   }
 
   pub fn save(&self, path: &Path) -> anyhow::Result<()> {
-    self.validate()?;
-    let yaml = serde_yaml::to_string(self).context("序列化 YAML 配置失败")?;
+    let mut next = self.clone();
+    next.apply_defaults();
+    next.validate()?;
+    let yaml = serde_yaml::to_string(&next).context("序列化 YAML 配置失败")?;
     fs::write(path, yaml).with_context(|| format!("写入配置失败: {}", path.display()))?;
     Ok(())
+  }
+
+  pub fn apply_defaults(&mut self) {
+    self.history_summary.apply_defaults(&self.byok);
   }
 
   pub fn validate(&self) -> anyhow::Result<()> {
@@ -459,6 +466,41 @@ impl Default for HistorySummaryConfig {
 }
 
 impl HistorySummaryConfig {
+  pub fn apply_defaults(&mut self, byok: &ByokConfig) {
+    if !self.enabled {
+      return;
+    }
+
+    if self.provider_id.trim().is_empty() {
+      if let Some(id) = byok
+        .active_provider_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+      {
+        self.provider_id = id.to_string();
+      } else if let Some(first) = byok.providers.first() {
+        let id = first.id().trim();
+        if !id.is_empty() {
+          self.provider_id = id.to_string();
+        }
+      }
+    }
+
+    if self.model.trim().is_empty() {
+      let pid = self.provider_id.trim();
+      if let Some(p) = byok.providers.iter().find(|p| p.id().trim() == pid) {
+        let default_model = match p {
+          ProviderConfig::Anthropic(p) => p.default_model.as_str(),
+          ProviderConfig::OpenAICompatible(p) => p.default_model.as_str(),
+        };
+        if !default_model.trim().is_empty() {
+          self.model = default_model.trim().to_string();
+        }
+      }
+    }
+  }
+
   pub fn validate(&self, byok: &ByokConfig) -> anyhow::Result<()> {
     if !self.enabled {
       return Ok(());

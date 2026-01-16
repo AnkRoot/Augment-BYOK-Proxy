@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use anyhow::Context;
 use reqwest::header::HeaderValue;
@@ -16,10 +16,11 @@ use crate::convert::{convert_augment_to_anthropic, convert_augment_to_openai_com
 use crate::history_summary::render_history_summary_node_value;
 use crate::openai::OpenAIChatCompletionRequest;
 use crate::protocol::{
-  AugmentChatHistory, AugmentRequest, NodeIn, TextNode, REQUEST_NODE_FILE, REQUEST_NODE_FILE_ID,
-  REQUEST_NODE_HISTORY_SUMMARY, REQUEST_NODE_IMAGE, REQUEST_NODE_IMAGE_ID, REQUEST_NODE_TEXT,
+  has_history_summary_node, AugmentChatHistory, AugmentRequest, NodeIn, TextNode, REQUEST_NODE_FILE,
+  REQUEST_NODE_FILE_ID, REQUEST_NODE_IMAGE, REQUEST_NODE_IMAGE_ID, REQUEST_NODE_TEXT,
   REQUEST_NODE_TOOL_RESULT, RESPONSE_NODE_TOOL_USE, RESPONSE_NODE_TOOL_USE_START,
 };
+use crate::util::{join_url, now_ms, normalize_raw_token};
 
 #[derive(Debug, Default)]
 pub struct HistorySummaryCache {
@@ -81,13 +82,6 @@ impl HistorySummaryCache {
   }
 }
 
-fn now_ms() -> u64 {
-  SystemTime::now()
-    .duration_since(UNIX_EPOCH)
-    .unwrap_or_default()
-    .as_millis() as u64
-}
-
 fn approx_token_count_from_byte_len(len: usize) -> u32 {
   const BYTES_PER_TOKEN: usize = 4;
   let tokens = len
@@ -139,53 +133,8 @@ enum TriggerDecision {
   },
 }
 
-fn normalize_raw_token(token: &str) -> String {
-  let mut t = token.trim();
-  if t.is_empty() {
-    return String::new();
-  }
-  let lower = t.to_ascii_lowercase();
-  if lower.starts_with("bearer ") {
-    t = t[7..].trim();
-  }
-  if let Some((k, v)) = t.split_once('=') {
-    let k = k.trim();
-    let v = v.trim();
-    let looks_like_env = !k.is_empty()
-      && !v.is_empty()
-      && k
-        .chars()
-        .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
-      && (k.ends_with("_TOKEN")
-        || k.ends_with("_API_TOKEN")
-        || k.ends_with("_KEY")
-        || k.ends_with("_API_KEY"));
-    if looks_like_env {
-      t = v;
-    }
-  }
-  t.to_string()
-}
-
-fn join_url(base_url: &str, endpoint: &str) -> anyhow::Result<String> {
-  let mut base = base_url.trim().to_string();
-  if !base.ends_with('/') {
-    base.push('/');
-  }
-  let endpoint = endpoint.trim_start_matches('/');
-  let url = format!("{base}{endpoint}");
-  let _ = url::Url::parse(&url)?;
-  Ok(url)
-}
-
 fn node_is_tool_result(n: &NodeIn) -> bool {
   n.node_type == REQUEST_NODE_TOOL_RESULT && n.tool_result_node.is_some()
-}
-
-fn has_history_summary_node(nodes: &[NodeIn]) -> bool {
-  nodes.iter().any(|n| {
-    n.node_type == REQUEST_NODE_HISTORY_SUMMARY && n.history_summary_node.is_some()
-  })
 }
 
 fn history_contains_summary(history: &[AugmentChatHistory]) -> bool {

@@ -5,6 +5,7 @@ mod history_summary;
 mod history_summary_auto;
 mod openai;
 mod protocol;
+mod util;
 
 use std::{collections::HashMap, convert::Infallible, path::PathBuf, sync::Arc, time::Duration};
 
@@ -36,6 +37,7 @@ use crate::{
   history_summary_auto::{maybe_summarize_and_compact, HistorySummaryCache},
   openai::OpenAIChatCompletionChunk,
   protocol::{error_response, probe_response, AugmentRequest, AugmentStreamChunk},
+  util::{join_url, now_ms, normalize_raw_token},
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -177,8 +179,9 @@ async fn admin_get_config(State(state): State<AppState>) -> impl IntoResponse {
 
 async fn admin_put_config(
   State(state): State<AppState>,
-  axum::Json(next): axum::Json<Config>,
+  axum::Json(mut next): axum::Json<Config>,
 ) -> impl IntoResponse {
+  next.apply_defaults();
   if let Err(err) = next.validate() {
     return (
       StatusCode::BAD_REQUEST,
@@ -2007,47 +2010,8 @@ fn format_chat_stream_body_for_log(body: &[u8]) -> String {
   }
 }
 
-fn now_ms() -> u64 {
-  use std::time::{SystemTime, UNIX_EPOCH};
-  SystemTime::now()
-    .duration_since(UNIX_EPOCH)
-    .unwrap_or_default()
-    .as_millis() as u64
-}
-
 fn normalize_string(s: &str) -> String {
   s.trim().to_string()
-}
-
-fn normalize_raw_token(token: &str) -> String {
-  let mut t = token.trim();
-  if t.is_empty() {
-    return String::new();
-  }
-
-  let lower = t.to_ascii_lowercase();
-  if lower.starts_with("bearer ") {
-    t = t[7..].trim();
-  }
-
-  if let Some((k, v)) = t.split_once('=') {
-    let k = k.trim();
-    let v = v.trim();
-    let looks_like_env = !k.is_empty()
-      && !v.is_empty()
-      && k
-        .chars()
-        .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
-      && (k.ends_with("_TOKEN")
-        || k.ends_with("_API_TOKEN")
-        || k.ends_with("_KEY")
-        || k.ends_with("_API_KEY"));
-    if looks_like_env {
-      t = v;
-    }
-  }
-
-  t.to_string()
 }
 
 const AUTH_HEADER_CANDIDATES: [&str; 10] = [
@@ -2369,17 +2333,6 @@ async fn fetch_openai_models(
   models.sort();
   models.dedup();
   Ok(models)
-}
-
-fn join_url(base_url: &str, endpoint: &str) -> anyhow::Result<String> {
-  let mut base = base_url.trim().to_string();
-  if !base.ends_with('/') {
-    base.push('/');
-  }
-  let endpoint = endpoint.trim_start_matches('/');
-  let url = format!("{base}{endpoint}");
-  let _ = url::Url::parse(&url)?;
-  Ok(url)
 }
 
 fn parse_augment_request(body: &[u8]) -> anyhow::Result<AugmentRequest> {

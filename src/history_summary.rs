@@ -2,9 +2,9 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::protocol::{
-  AugmentChatHistory, NodeIn, TextNode, REQUEST_NODE_HISTORY_SUMMARY, REQUEST_NODE_TEXT,
-  REQUEST_NODE_TOOL_RESULT, RESPONSE_NODE_MAIN_TEXT_FINISHED, RESPONSE_NODE_RAW_RESPONSE,
-  RESPONSE_NODE_THINKING, RESPONSE_NODE_TOOL_USE,
+  has_history_summary_node, AugmentChatHistory, NodeIn, TextNode, REQUEST_NODE_HISTORY_SUMMARY,
+  REQUEST_NODE_TEXT, REQUEST_NODE_TOOL_RESULT, RESPONSE_NODE_MAIN_TEXT_FINISHED,
+  RESPONSE_NODE_RAW_RESPONSE, RESPONSE_NODE_THINKING, RESPONSE_NODE_TOOL_USE,
 };
 
 #[derive(Debug, Clone, Deserialize)]
@@ -267,12 +267,6 @@ pub fn render_history_summary_node_value(v: &Value, extra_tool_results: &[NodeIn
   Some(rendered)
 }
 
-fn has_history_summary_node(nodes: &[NodeIn]) -> bool {
-  nodes.iter().any(|n| {
-    n.node_type == REQUEST_NODE_HISTORY_SUMMARY && n.history_summary_node.is_some()
-  })
-}
-
 fn chat_history_item_has_summary(item: &AugmentChatHistory) -> bool {
   has_history_summary_node(&item.request_nodes)
     || has_history_summary_node(&item.structured_request_nodes)
@@ -297,9 +291,7 @@ pub fn compact_chat_history(chat_history: &mut Vec<AugmentChatHistory>) {
   req_nodes.append(&mut first.structured_request_nodes);
   req_nodes.append(&mut first.nodes);
 
-  let Some(summary_pos) = req_nodes.iter().position(|n| {
-    n.node_type == REQUEST_NODE_HISTORY_SUMMARY && n.history_summary_node.is_some()
-  }) else {
+  let Some(summary_pos) = req_nodes.iter().position(NodeIn::is_history_summary_node) else {
     first.request_nodes = req_nodes;
     return;
   };

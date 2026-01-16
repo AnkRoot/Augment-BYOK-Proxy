@@ -495,6 +495,7 @@ fn push_history_messages_openai(
     history.response_text.clone()
   };
   let tool_calls = build_openai_tool_calls_from_output_nodes(out_nodes.clone());
+  let has_tool_calls = !tool_calls.is_empty();
   let content =
     (!assistant_text.trim().is_empty()).then(|| Value::String(assistant_text.trim().to_string()));
   if content.is_some() || !tool_calls.is_empty() {
@@ -512,9 +513,9 @@ fn push_history_messages_openai(
       .iter()
       .chain(&next.structured_request_nodes)
       .chain(&next.nodes);
-    out.extend(build_openai_tool_messages_from_request_nodes(
-      next_req_nodes,
-    ));
+    if has_tool_calls {
+      out.extend(build_openai_tool_messages_from_request_nodes(next_req_nodes));
+    }
   }
   Ok(())
 }
@@ -2067,12 +2068,34 @@ mod tests {
   use super::*;
   use crate::config::{AnthropicProviderConfig, OpenAICompatibleProviderConfig, ThinkingConfig};
 	  use crate::protocol::{
-	    AugmentChatHistory, AugmentContext, AugmentRequest, NodeIn, TextNode, ToolDefinition,
-	    REQUEST_NODE_TEXT, RESPONSE_NODE_MAIN_TEXT_FINISHED, RESPONSE_NODE_RAW_RESPONSE,
-	    RESPONSE_NODE_THINKING, RESPONSE_NODE_TOOL_USE, RESPONSE_NODE_TOOL_USE_START,
+	    AugmentChatHistory, AugmentContext, AugmentRequest, NodeIn, TextNode, ToolDefinition, ToolResultContentNode,
+	    ToolResultNode, ToolUse, REQUEST_NODE_TEXT, REQUEST_NODE_TOOL_RESULT, RESPONSE_NODE_MAIN_TEXT_FINISHED,
+	    RESPONSE_NODE_RAW_RESPONSE, RESPONSE_NODE_THINKING, RESPONSE_NODE_TOOL_USE, RESPONSE_NODE_TOOL_USE_START,
+	    TOOL_RESULT_CONTENT_NODE_TEXT,
 	  };
   use pretty_assertions::assert_eq;
   use std::collections::BTreeMap;
+
+  fn empty_node(id: i32, node_type: i32) -> NodeIn {
+    NodeIn {
+      id,
+      node_type,
+      content: String::new(),
+      text_node: None,
+      tool_result_node: None,
+      image_node: None,
+      image_id_node: None,
+      ide_state_node: None,
+      edit_events_node: None,
+      checkpoint_ref_node: None,
+      change_personality_node: None,
+      file_node: None,
+      file_id_node: None,
+      history_summary_node: None,
+      tool_use: None,
+      thinking: None,
+    }
+  }
 
   fn make_text_node(id: i32, content: &str) -> NodeIn {
     NodeIn {
@@ -2095,6 +2118,33 @@ mod tests {
       tool_use: None,
       thinking: None,
     }
+  }
+
+  fn make_tool_use_node(id: i32, tool_use_id: &str) -> NodeIn {
+    let mut n = empty_node(id, RESPONSE_NODE_TOOL_USE);
+    n.tool_use = Some(ToolUse {
+      tool_use_id: tool_use_id.to_string(),
+      tool_name: "view".to_string(),
+      input_json: "{\"path\":\"README.md\"}".to_string(),
+      mcp_server_name: String::new(),
+      mcp_tool_name: String::new(),
+    });
+    n
+  }
+
+  fn make_tool_result_node(id: i32, tool_use_id: &str) -> NodeIn {
+    let mut n = empty_node(id, REQUEST_NODE_TOOL_RESULT);
+    n.tool_result_node = Some(ToolResultNode {
+      tool_use_id: tool_use_id.to_string(),
+      content: "OK".to_string(),
+      content_nodes: vec![ToolResultContentNode {
+        node_type: TOOL_RESULT_CONTENT_NODE_TEXT,
+        text_content: "OK".to_string(),
+        image_content: None,
+      }],
+      is_error: false,
+    });
+    n
   }
 
   #[test]
@@ -2373,6 +2423,135 @@ mod tests {
 	    assert_eq!(user.contains("SUFFIX_CODE"), true);
 	    assert_eq!(user.contains("DIFF_TEXT"), true);
 	  }
+
+  #[test]
+  fn openai_history_does_not_emit_orphan_tool_messages() {
+    let provider = OpenAICompatibleProviderConfig {
+      id: "o1".to_string(),
+      base_url: "https://api.openai.com/v1".to_string(),
+      api_key: "sk-test".to_string(),
+      default_model: "gpt-4o-mini".to_string(),
+      max_tokens: 1234,
+      timeout_seconds: 120,
+      extra_headers: BTreeMap::new(),
+    };
+
+    let history = vec![
+      AugmentChatHistory {
+        response_text: String::new(),
+        request_message: "[PREVIOUS_SUMMARY]\nS\n[/PREVIOUS_SUMMARY]".to_string(),
+        request_id: "r0".to_string(),
+        request_nodes: Vec::new(),
+        structured_request_nodes: Vec::new(),
+        nodes: Vec::new(),
+        response_nodes: Vec::new(),
+        structured_output_nodes: Vec::new(),
+      },
+      AugmentChatHistory {
+        response_text: "done".to_string(),
+        request_message: "-".to_string(),
+        request_id: "r1".to_string(),
+        request_nodes: vec![make_tool_result_node(1, "tool-1")],
+        structured_request_nodes: Vec::new(),
+        nodes: Vec::new(),
+        response_nodes: Vec::new(),
+        structured_output_nodes: Vec::new(),
+      },
+    ];
+
+    let augment = AugmentRequest {
+      model: None,
+      chat_history: history,
+      message: "hi".to_string(),
+      agent_memories: String::new(),
+      mode: "CHAT".to_string(),
+      prefix: String::new(),
+      selected_code: String::new(),
+      suffix: String::new(),
+      diff: String::new(),
+      lang: String::new(),
+      path: String::new(),
+      user_guidelines: String::new(),
+      workspace_guidelines: String::new(),
+      rules: Value::Null,
+      tool_definitions: Vec::new(),
+      nodes: Vec::new(),
+      structured_request_nodes: Vec::new(),
+      request_nodes: Vec::new(),
+      conversation_id: None,
+      context: None,
+    };
+
+    let out = convert_augment_to_openai_compatible(&provider, &augment, "gpt-4o-mini".to_string())
+      .unwrap();
+    assert_eq!(out.messages.iter().any(|m| m.role == "tool"), false);
+  }
+
+  #[test]
+  fn openai_history_emits_tool_messages_after_tool_calls() {
+    let provider = OpenAICompatibleProviderConfig {
+      id: "o1".to_string(),
+      base_url: "https://api.openai.com/v1".to_string(),
+      api_key: "sk-test".to_string(),
+      default_model: "gpt-4o-mini".to_string(),
+      max_tokens: 1234,
+      timeout_seconds: 120,
+      extra_headers: BTreeMap::new(),
+    };
+
+    let history = vec![
+      AugmentChatHistory {
+        response_text: String::new(),
+        request_message: "please run a tool".to_string(),
+        request_id: "r0".to_string(),
+        request_nodes: Vec::new(),
+        structured_request_nodes: Vec::new(),
+        nodes: Vec::new(),
+        response_nodes: vec![make_tool_use_node(1, "tool-1")],
+        structured_output_nodes: Vec::new(),
+      },
+      AugmentChatHistory {
+        response_text: "done".to_string(),
+        request_message: "-".to_string(),
+        request_id: "r1".to_string(),
+        request_nodes: vec![make_tool_result_node(1, "tool-1")],
+        structured_request_nodes: Vec::new(),
+        nodes: Vec::new(),
+        response_nodes: Vec::new(),
+        structured_output_nodes: Vec::new(),
+      },
+    ];
+
+    let augment = AugmentRequest {
+      model: None,
+      chat_history: history,
+      message: "hi".to_string(),
+      agent_memories: String::new(),
+      mode: "CHAT".to_string(),
+      prefix: String::new(),
+      selected_code: String::new(),
+      suffix: String::new(),
+      diff: String::new(),
+      lang: String::new(),
+      path: String::new(),
+      user_guidelines: String::new(),
+      workspace_guidelines: String::new(),
+      rules: Value::Null,
+      tool_definitions: Vec::new(),
+      nodes: Vec::new(),
+      structured_request_nodes: Vec::new(),
+      request_nodes: Vec::new(),
+      conversation_id: None,
+      context: None,
+    };
+
+    let out = convert_augment_to_openai_compatible(&provider, &augment, "gpt-4o-mini".to_string())
+      .unwrap();
+
+    let tool_msgs: Vec<&OpenAIChatMessage> = out.messages.iter().filter(|m| m.role == "tool").collect();
+    assert_eq!(tool_msgs.len(), 1);
+    assert_eq!(tool_msgs[0].tool_call_id.as_deref(), Some("tool-1"));
+  }
 	
 	  #[test]
 	  fn virtual_nodes_and_system_fall_back_to_context() {

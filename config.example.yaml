@@ -57,9 +57,9 @@ history_summary:
   # - false：仅由 proxy 侧压缩（client 仍发全量 chat_history）
   # - true：注入版 VSIX 会读取 /admin/api/config 并按同一套阈值做 client-side compaction（需要安装注入版 VSIX）
   client_compaction_enabled: false
-  # 专用摘要模型所在 provider（必须是 byok.providers[].id）
+  # 专用摘要模型所在 provider（可选；留空则默认用 byok.active_provider_id / providers[0]）
   provider_id: "openai"
-  # 专用摘要模型名称（按对应 provider 的模型命名规则）
+  # 专用摘要模型名称（可选；留空则默认用该 provider 的 default_model）
   model: "gpt-4o-mini"
   # 摘要调用 max_tokens / 超时
   max_tokens: 1024

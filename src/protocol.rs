@@ -221,6 +221,16 @@ pub struct NodeIn {
   pub thinking: Option<ThinkingNode>,
 }
 
+impl NodeIn {
+  pub fn is_history_summary_node(&self) -> bool {
+    self.node_type == REQUEST_NODE_HISTORY_SUMMARY && self.history_summary_node.is_some()
+  }
+}
+
+pub fn has_history_summary_node(nodes: &[NodeIn]) -> bool {
+  nodes.iter().any(NodeIn::is_history_summary_node)
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct TextNode {
   #[serde(default, deserialize_with = "de_null_as_default")]
