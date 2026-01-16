@@ -37,7 +37,7 @@ use crate::{
   history_summary_auto::{maybe_summarize_and_compact, HistorySummaryCache},
   openai::OpenAIChatCompletionChunk,
   protocol::{error_response, probe_response, AugmentRequest, AugmentStreamChunk},
-  util::{join_url, now_ms, normalize_raw_token},
+  util::{join_url, normalize_raw_token, now_ms},
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -90,12 +90,18 @@ struct AppState {
   http: reqwest::Client,
   models_cache: Arc<RwLock<ModelCache>>,
   history_summary_cache: Arc<RwLock<HistorySummaryCache>>,
+  history_summary_cache_path: PathBuf,
 }
 
 #[derive(Debug, serde::Deserialize)]
 struct ChatStreamQuery {
   #[serde(default)]
   model: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct AdminDeleteHistorySummaryCacheReq {
+  conversation_id: String,
 }
 
 #[derive(Debug, Default)]
@@ -122,12 +128,27 @@ async fn main() -> anyhow::Result<()> {
   let addr = cfg.server.socket_addr()?;
   let http = reqwest::Client::builder().build()?;
 
+  let history_summary_cache_path = args.config.with_file_name("history_summary_cache.json");
+  let history_summary_cache =
+    match HistorySummaryCache::load_from_file(&history_summary_cache_path).await {
+      Ok(v) => v,
+      Err(err) => {
+        warn!(
+          error=%err,
+          cache_path=%history_summary_cache_path.display(),
+          "history_summary cache 读取失败（将使用空缓存）"
+        );
+        HistorySummaryCache::default()
+      }
+    };
+
   let state = AppState {
     config_path: args.config,
     cfg: Arc::new(RwLock::new(cfg)),
     http,
     models_cache: Arc::new(RwLock::new(ModelCache::default())),
-    history_summary_cache: Arc::new(RwLock::new(HistorySummaryCache::default())),
+    history_summary_cache: Arc::new(RwLock::new(history_summary_cache)),
+    history_summary_cache_path,
   };
 
   let app = Router::new()
@@ -143,7 +164,10 @@ async fn main() -> anyhow::Result<()> {
       "/generate-commit-message-stream",
       post(generate_commit_message_stream),
     )
-    .route("/generate-conversation-title", post(generate_conversation_title))
+    .route(
+      "/generate-conversation-title",
+      post(generate_conversation_title),
+    )
     .route("/chat-stream", post(chat_stream))
     .route("/get-models", post(get_models))
     .route("/admin", get(admin_index))
@@ -152,6 +176,14 @@ async fn main() -> anyhow::Result<()> {
       get(admin_get_config).put(admin_put_config),
     )
     .route("/admin/api/config/save", post(admin_save_config))
+    .route(
+      "/admin/api/history-summary-cache/delete",
+      post(admin_delete_history_summary_cache),
+    )
+    .route(
+      "/admin/api/history-summary-cache/clear",
+      post(admin_clear_history_summary_cache),
+    )
     .fallback(proxy_fallback)
     .with_state(state)
     .layer(axum::extract::DefaultBodyLimit::max(16 * 1024 * 1024));
@@ -179,9 +211,8 @@ async fn admin_get_config(State(state): State<AppState>) -> impl IntoResponse {
 
 async fn admin_put_config(
   State(state): State<AppState>,
-  axum::Json(mut next): axum::Json<Config>,
+  axum::Json(next): axum::Json<Config>,
 ) -> impl IntoResponse {
-  next.apply_defaults();
   if let Err(err) = next.validate() {
     return (
       StatusCode::BAD_REQUEST,
@@ -226,6 +257,64 @@ async fn admin_save_config(State(state): State<AppState>) -> impl IntoResponse {
   )
 }
 
+async fn admin_delete_history_summary_cache(
+  State(state): State<AppState>,
+  axum::Json(req): axum::Json<AdminDeleteHistorySummaryCacheReq>,
+) -> impl IntoResponse {
+  let cid = req.conversation_id.trim();
+  if cid.is_empty() {
+    return (
+      StatusCode::BAD_REQUEST,
+      axum::Json(serde_json::json!({ "ok": false, "error": "conversation_id 不能为空" })),
+    );
+  }
+
+  let (deleted, snapshot) = {
+    let mut guard = state.history_summary_cache.write().await;
+    let deleted = guard.remove_conversation(cid);
+    let snapshot = if deleted { Some(guard.clone()) } else { None };
+    (deleted, snapshot)
+  };
+
+  if let Some(snapshot) = snapshot {
+    if let Err(err) = snapshot
+      .save_to_file(state.history_summary_cache_path.as_path())
+      .await
+    {
+      return (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        axum::Json(serde_json::json!({ "ok": false, "error": format!("{err}") })),
+      );
+    }
+  }
+
+  (
+    StatusCode::OK,
+    axum::Json(serde_json::json!({ "ok": true, "deleted": deleted })),
+  )
+}
+
+async fn admin_clear_history_summary_cache(State(state): State<AppState>) -> impl IntoResponse {
+  let snapshot = {
+    let mut guard = state.history_summary_cache.write().await;
+    guard.clear_all();
+    guard.clone()
+  };
+  if let Err(err) = snapshot
+    .save_to_file(state.history_summary_cache_path.as_path())
+    .await
+  {
+    return (
+      StatusCode::INTERNAL_SERVER_ERROR,
+      axum::Json(serde_json::json!({ "ok": false, "error": format!("{err}") })),
+    );
+  }
+  (
+    StatusCode::OK,
+    axum::Json(serde_json::json!({ "ok": true })),
+  )
+}
+
 async fn chat_stream(
   State(state): State<AppState>,
   Query(query): Query<ChatStreamQuery>,
@@ -242,10 +331,17 @@ async fn chat_stream(
     ));
   }
   if mode == ByokMode::Disabled {
-    return ndjson_response(error_response("⛔ chat-stream 已被禁用（byok routing: disabled）"));
+    return ndjson_response(error_response(
+      "⛔ chat-stream 已被禁用（byok routing: disabled）",
+    ));
   }
   if mode == ByokMode::Official {
-    let uri = if let Some(model) = query.model.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    let uri = if let Some(model) = query
+      .model
+      .as_deref()
+      .map(str::trim)
+      .filter(|s| !s.is_empty())
+    {
       let mut ser = url::form_urlencoded::Serializer::new(String::new());
       ser.append_pair("model", model);
       let q = ser.finish();
@@ -332,6 +428,8 @@ async fn chat_stream(
     &state.http,
     &cfg,
     &state.history_summary_cache,
+    state.history_summary_cache_path.as_path(),
+    provider.id(),
     model_for_trigger.as_str(),
     &mut augment,
   )
@@ -632,31 +730,31 @@ async fn chat_stream(
               }
             }
 
-	            if let Some(calls) = choice.delta.tool_calls.as_ref() {
-	              for c in calls {
-	                let idx = c.index.unwrap_or(0);
-	                let id = c.id.as_deref();
-	                let name = c.function.as_ref().and_then(|f| f.name.as_deref());
-	                let args = c.function.as_ref().and_then(|f| f.arguments.as_deref());
-	                if let Some(chunk) = state_machine.on_tool_call_delta(idx, id, name, args) {
-	                  if let Ok(line) = serde_json::to_string(&chunk) {
-	                    emitted_chunks += 1;
-	                    yield Ok::<Bytes, Infallible>(Bytes::from(format!("{line}\n")));
-	                  }
-	                }
-	              }
-	            }
+              if let Some(calls) = choice.delta.tool_calls.as_ref() {
+                for c in calls {
+                  let idx = c.index.unwrap_or(0);
+                  let id = c.id.as_deref();
+                  let name = c.function.as_ref().and_then(|f| f.name.as_deref());
+                  let args = c.function.as_ref().and_then(|f| f.arguments.as_deref());
+                  if let Some(chunk) = state_machine.on_tool_call_delta(idx, id, name, args) {
+                    if let Ok(line) = serde_json::to_string(&chunk) {
+                      emitted_chunks += 1;
+                      yield Ok::<Bytes, Infallible>(Bytes::from(format!("{line}\n")));
+                    }
+                  }
+                }
+              }
 
-	            if let Some(fc) = choice.delta.function_call.as_ref() {
-	              let name = fc.name.as_deref();
-	              let args = fc.arguments.as_deref();
-	              if let Some(chunk) = state_machine.on_tool_call_delta(0, None, name, args) {
-	                if let Ok(line) = serde_json::to_string(&chunk) {
-	                  emitted_chunks += 1;
-	                  yield Ok::<Bytes, Infallible>(Bytes::from(format!("{line}\n")));
-	                }
-	              }
-	            }
+              if let Some(fc) = choice.delta.function_call.as_ref() {
+                let name = fc.name.as_deref();
+                let args = fc.arguments.as_deref();
+                if let Some(chunk) = state_machine.on_tool_call_delta(0, None, name, args) {
+                  if let Ok(line) = serde_json::to_string(&chunk) {
+                    emitted_chunks += 1;
+                    yield Ok::<Bytes, Infallible>(Bytes::from(format!("{line}\n")));
+                  }
+                }
+              }
 
             if let Some(r) = choice.finish_reason.as_deref() {
               state_machine.on_finish_reason(r);
@@ -728,7 +826,12 @@ fn build_system_text(body: &serde_json::Value) -> String {
     if let Some(arr) = v.as_array() {
       let lines: Vec<String> = arr
         .iter()
-        .filter_map(|x| x.as_str().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string))
+        .filter_map(|x| {
+          x.as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+        })
         .collect();
       if !lines.is_empty() {
         parts.push(format!("{label}:\n{}", lines.join("\n")));
@@ -736,8 +839,16 @@ fn build_system_text(body: &serde_json::Value) -> String {
     }
   }
 
-  push_lines(parts.as_mut(), "User Guidelines", body.get("user_guidelines"));
-  push_lines(parts.as_mut(), "Workspace Guidelines", body.get("workspace_guidelines"));
+  push_lines(
+    parts.as_mut(),
+    "User Guidelines",
+    body.get("user_guidelines"),
+  );
+  push_lines(
+    parts.as_mut(),
+    "Workspace Guidelines",
+    body.get("workspace_guidelines"),
+  );
   push_lines(parts.as_mut(), "Rules", body.get("rules"));
 
   parts.join("\n\n").trim().to_string()
@@ -774,7 +885,11 @@ fn build_user_text(body: &serde_json::Value) -> String {
   }
 
   let prefix = json_string(body.get("prefix"));
-  let selected = json_string(body.get("selected_text").or_else(|| body.get("selected_code")));
+  let selected = json_string(
+    body
+      .get("selected_text")
+      .or_else(|| body.get("selected_code")),
+  );
   let suffix = json_string(body.get("suffix"));
   let code = format!("{prefix}{selected}{suffix}").trim().to_string();
   if !code.is_empty() && code != main.trim() {
@@ -859,7 +974,10 @@ async fn provider_complete_text(
       });
       if !system.trim().is_empty() {
         if let Some(obj) = payload.as_object_mut() {
-          obj.insert("system".to_string(), serde_json::Value::String(system.trim().to_string()));
+          obj.insert(
+            "system".to_string(),
+            serde_json::Value::String(system.trim().to_string()),
+          );
         }
       }
       if p.thinking.enabled {
@@ -909,8 +1027,8 @@ async fn provider_complete_text(
       Ok(out.trim().to_string())
     }
     ProviderRef::OpenAICompatible(p) => {
-      let url =
-        join_url(&p.base_url, "chat/completions").context("构建 OpenAI chat/completions URL 失败")?;
+      let url = join_url(&p.base_url, "chat/completions")
+        .context("构建 OpenAI chat/completions URL 失败")?;
       let key = normalize_raw_token(&p.api_key);
       if key.is_empty() {
         anyhow::bail!("Provider({}) api_key 为空", p.id);
@@ -944,7 +1062,10 @@ async fn provider_complete_text(
         }
       }
 
-      let resp = req.send().await.context("请求 OpenAI /chat/completions 失败")?;
+      let resp = req
+        .send()
+        .await
+        .context("请求 OpenAI /chat/completions 失败")?;
       let status = resp.status();
       let text = resp.text().await.unwrap_or_default();
       if !status.is_success() {
@@ -1051,7 +1172,10 @@ async fn byok_text_stream_endpoint(
       });
       if !system.trim().is_empty() {
         if let Some(obj) = payload.as_object_mut() {
-          obj.insert("system".to_string(), serde_json::Value::String(system.trim().to_string()));
+          obj.insert(
+            "system".to_string(),
+            serde_json::Value::String(system.trim().to_string()),
+          );
         }
       }
       if p.thinking.enabled {
@@ -1214,40 +1338,75 @@ async fn byok_text_stream_endpoint(
   response
 }
 
-async fn chat(
-  State(state): State<AppState>,
-  headers: HeaderMap,
-  body: Bytes,
-) -> Response<Body> {
+async fn chat(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -> Response<Body> {
   let cfg = state.cfg.read().await.clone();
   let mode = read_byok_mode(&headers);
   if !is_authorized(&headers, &cfg.proxy.auth_token) {
-    return (StatusCode::UNAUTHORIZED, axum::Json(serde_json::json!({ "ok": false, "error": "Unauthorized" }))).into_response();
+    return (
+      StatusCode::UNAUTHORIZED,
+      axum::Json(serde_json::json!({ "ok": false, "error": "Unauthorized" })),
+    )
+      .into_response();
   }
   if mode == ByokMode::Disabled {
-    return (StatusCode::NOT_FOUND, axum::Json(serde_json::json!({ "ok": false, "error": "Disabled by routing rule" }))).into_response();
+    return (
+      StatusCode::NOT_FOUND,
+      axum::Json(serde_json::json!({ "ok": false, "error": "Disabled by routing rule" })),
+    )
+      .into_response();
   }
   if mode != ByokMode::Byok {
     let uri = axum::http::Uri::from_static("/chat");
-    return forward_to_official(&state, &cfg, axum::http::Method::POST, &uri, &headers, body, Duration::from_secs(120)).await;
+    return forward_to_official(
+      &state,
+      &cfg,
+      axum::http::Method::POST,
+      &uri,
+      &headers,
+      body,
+      Duration::from_secs(120),
+    )
+    .await;
   }
 
   let value: serde_json::Value = match serde_json::from_slice(&body) {
     Ok(v) => v,
-    Err(err) => return (StatusCode::BAD_REQUEST, axum::Json(serde_json::json!({ "ok": false, "error": format!("Bad JSON: {err}") }))).into_response(),
+    Err(err) => {
+      return (
+        StatusCode::BAD_REQUEST,
+        axum::Json(serde_json::json!({ "ok": false, "error": format!("Bad JSON: {err}") })),
+      )
+        .into_response()
+    }
   };
   if value.get("encrypted_data").is_some() {
-    return (StatusCode::BAD_REQUEST, axum::Json(serde_json::json!({ "ok": false, "error": "encrypted_data not supported" }))).into_response();
+    return (
+      StatusCode::BAD_REQUEST,
+      axum::Json(serde_json::json!({ "ok": false, "error": "encrypted_data not supported" })),
+    )
+      .into_response();
   }
   let (provider, model) = match pick_provider_and_model_for_simple(&cfg, &headers, &value) {
     Ok(v) => v,
-    Err(err) => return (StatusCode::BAD_REQUEST, axum::Json(serde_json::json!({ "ok": false, "error": format!("{err}") }))).into_response(),
+    Err(err) => {
+      return (
+        StatusCode::BAD_REQUEST,
+        axum::Json(serde_json::json!({ "ok": false, "error": format!("{err}") })),
+      )
+        .into_response()
+    }
   };
   let system = build_system_text(&value);
   let user = build_user_text(&value);
   let text = match provider_complete_text(&state, provider, &model, &system, &user).await {
     Ok(v) => v,
-    Err(err) => return (StatusCode::BAD_GATEWAY, axum::Json(serde_json::json!({ "ok": false, "error": format!("{err}") }))).into_response(),
+    Err(err) => {
+      return (
+        StatusCode::BAD_GATEWAY,
+        axum::Json(serde_json::json!({ "ok": false, "error": format!("{err}") })),
+      )
+        .into_response()
+    }
   };
   (StatusCode::OK, axum::Json(serde_json::json!({ "text": text, "unknown_blob_names": [], "checkpoint_not_found": false, "workspace_file_chunks": [], "nodes": [] }))).into_response()
 }
@@ -1260,32 +1419,71 @@ async fn completion(
   let cfg = state.cfg.read().await.clone();
   let mode = read_byok_mode(&headers);
   if !is_authorized(&headers, &cfg.proxy.auth_token) {
-    return (StatusCode::UNAUTHORIZED, axum::Json(serde_json::json!({ "ok": false, "error": "Unauthorized" }))).into_response();
+    return (
+      StatusCode::UNAUTHORIZED,
+      axum::Json(serde_json::json!({ "ok": false, "error": "Unauthorized" })),
+    )
+      .into_response();
   }
   if mode == ByokMode::Disabled {
-    return (StatusCode::NOT_FOUND, axum::Json(serde_json::json!({ "ok": false, "error": "Disabled by routing rule" }))).into_response();
+    return (
+      StatusCode::NOT_FOUND,
+      axum::Json(serde_json::json!({ "ok": false, "error": "Disabled by routing rule" })),
+    )
+      .into_response();
   }
   if mode != ByokMode::Byok {
     let uri = axum::http::Uri::from_static("/completion");
-    return forward_to_official(&state, &cfg, axum::http::Method::POST, &uri, &headers, body, Duration::from_secs(120)).await;
+    return forward_to_official(
+      &state,
+      &cfg,
+      axum::http::Method::POST,
+      &uri,
+      &headers,
+      body,
+      Duration::from_secs(120),
+    )
+    .await;
   }
 
   let value: serde_json::Value = match serde_json::from_slice(&body) {
     Ok(v) => v,
-    Err(err) => return (StatusCode::BAD_REQUEST, axum::Json(serde_json::json!({ "ok": false, "error": format!("Bad JSON: {err}") }))).into_response(),
+    Err(err) => {
+      return (
+        StatusCode::BAD_REQUEST,
+        axum::Json(serde_json::json!({ "ok": false, "error": format!("Bad JSON: {err}") })),
+      )
+        .into_response()
+    }
   };
   if value.get("encrypted_data").is_some() {
-    return (StatusCode::BAD_REQUEST, axum::Json(serde_json::json!({ "ok": false, "error": "encrypted_data not supported" }))).into_response();
+    return (
+      StatusCode::BAD_REQUEST,
+      axum::Json(serde_json::json!({ "ok": false, "error": "encrypted_data not supported" })),
+    )
+      .into_response();
   }
   let (provider, model) = match pick_provider_and_model_for_simple(&cfg, &headers, &value) {
     Ok(v) => v,
-    Err(err) => return (StatusCode::BAD_REQUEST, axum::Json(serde_json::json!({ "ok": false, "error": format!("{err}") }))).into_response(),
+    Err(err) => {
+      return (
+        StatusCode::BAD_REQUEST,
+        axum::Json(serde_json::json!({ "ok": false, "error": format!("{err}") })),
+      )
+        .into_response()
+    }
   };
   let system = build_system_text(&value);
   let user = build_user_text(&value);
   let text = match provider_complete_text(&state, provider, &model, &system, &user).await {
     Ok(v) => v,
-    Err(err) => return (StatusCode::BAD_GATEWAY, axum::Json(serde_json::json!({ "ok": false, "error": format!("{err}") }))).into_response(),
+    Err(err) => {
+      return (
+        StatusCode::BAD_GATEWAY,
+        axum::Json(serde_json::json!({ "ok": false, "error": format!("{err}") })),
+      )
+        .into_response()
+    }
   };
   let out = serde_json::json!({
     "completion_items": [{ "text": text, "suffix_replacement_text": "", "skipped_suffix": "" }],
@@ -1306,32 +1504,71 @@ async fn chat_input_completion(
   let cfg = state.cfg.read().await.clone();
   let mode = read_byok_mode(&headers);
   if !is_authorized(&headers, &cfg.proxy.auth_token) {
-    return (StatusCode::UNAUTHORIZED, axum::Json(serde_json::json!({ "ok": false, "error": "Unauthorized" }))).into_response();
+    return (
+      StatusCode::UNAUTHORIZED,
+      axum::Json(serde_json::json!({ "ok": false, "error": "Unauthorized" })),
+    )
+      .into_response();
   }
   if mode == ByokMode::Disabled {
-    return (StatusCode::NOT_FOUND, axum::Json(serde_json::json!({ "ok": false, "error": "Disabled by routing rule" }))).into_response();
+    return (
+      StatusCode::NOT_FOUND,
+      axum::Json(serde_json::json!({ "ok": false, "error": "Disabled by routing rule" })),
+    )
+      .into_response();
   }
   if mode != ByokMode::Byok {
     let uri = axum::http::Uri::from_static("/chat-input-completion");
-    return forward_to_official(&state, &cfg, axum::http::Method::POST, &uri, &headers, body, Duration::from_secs(120)).await;
+    return forward_to_official(
+      &state,
+      &cfg,
+      axum::http::Method::POST,
+      &uri,
+      &headers,
+      body,
+      Duration::from_secs(120),
+    )
+    .await;
   }
 
   let value: serde_json::Value = match serde_json::from_slice(&body) {
     Ok(v) => v,
-    Err(err) => return (StatusCode::BAD_REQUEST, axum::Json(serde_json::json!({ "ok": false, "error": format!("Bad JSON: {err}") }))).into_response(),
+    Err(err) => {
+      return (
+        StatusCode::BAD_REQUEST,
+        axum::Json(serde_json::json!({ "ok": false, "error": format!("Bad JSON: {err}") })),
+      )
+        .into_response()
+    }
   };
   if value.get("encrypted_data").is_some() {
-    return (StatusCode::BAD_REQUEST, axum::Json(serde_json::json!({ "ok": false, "error": "encrypted_data not supported" }))).into_response();
+    return (
+      StatusCode::BAD_REQUEST,
+      axum::Json(serde_json::json!({ "ok": false, "error": "encrypted_data not supported" })),
+    )
+      .into_response();
   }
   let (provider, model) = match pick_provider_and_model_for_simple(&cfg, &headers, &value) {
     Ok(v) => v,
-    Err(err) => return (StatusCode::BAD_REQUEST, axum::Json(serde_json::json!({ "ok": false, "error": format!("{err}") }))).into_response(),
+    Err(err) => {
+      return (
+        StatusCode::BAD_REQUEST,
+        axum::Json(serde_json::json!({ "ok": false, "error": format!("{err}") })),
+      )
+        .into_response()
+    }
   };
   let system = build_system_text(&value);
   let user = build_user_text(&value);
   let text = match provider_complete_text(&state, provider, &model, &system, &user).await {
     Ok(v) => v,
-    Err(err) => return (StatusCode::BAD_GATEWAY, axum::Json(serde_json::json!({ "ok": false, "error": format!("{err}") }))).into_response(),
+    Err(err) => {
+      return (
+        StatusCode::BAD_GATEWAY,
+        axum::Json(serde_json::json!({ "ok": false, "error": format!("{err}") })),
+      )
+        .into_response()
+    }
   };
   let out = serde_json::json!({
     "completion_items": [{ "text": text, "suffix_replacement_text": "", "skipped_suffix": "" }],
@@ -1344,42 +1581,78 @@ async fn chat_input_completion(
   (StatusCode::OK, axum::Json(out)).into_response()
 }
 
-async fn edit(
-  State(state): State<AppState>,
-  headers: HeaderMap,
-  body: Bytes,
-) -> Response<Body> {
+async fn edit(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -> Response<Body> {
   let cfg = state.cfg.read().await.clone();
   let mode = read_byok_mode(&headers);
   if !is_authorized(&headers, &cfg.proxy.auth_token) {
-    return (StatusCode::UNAUTHORIZED, axum::Json(serde_json::json!({ "ok": false, "error": "Unauthorized" }))).into_response();
+    return (
+      StatusCode::UNAUTHORIZED,
+      axum::Json(serde_json::json!({ "ok": false, "error": "Unauthorized" })),
+    )
+      .into_response();
   }
   if mode == ByokMode::Disabled {
-    return (StatusCode::NOT_FOUND, axum::Json(serde_json::json!({ "ok": false, "error": "Disabled by routing rule" }))).into_response();
+    return (
+      StatusCode::NOT_FOUND,
+      axum::Json(serde_json::json!({ "ok": false, "error": "Disabled by routing rule" })),
+    )
+      .into_response();
   }
   if mode != ByokMode::Byok {
     let uri = axum::http::Uri::from_static("/edit");
-    return forward_to_official(&state, &cfg, axum::http::Method::POST, &uri, &headers, body, Duration::from_secs(120)).await;
+    return forward_to_official(
+      &state,
+      &cfg,
+      axum::http::Method::POST,
+      &uri,
+      &headers,
+      body,
+      Duration::from_secs(120),
+    )
+    .await;
   }
 
   let value: serde_json::Value = match serde_json::from_slice(&body) {
     Ok(v) => v,
-    Err(err) => return (StatusCode::BAD_REQUEST, axum::Json(serde_json::json!({ "ok": false, "error": format!("Bad JSON: {err}") }))).into_response(),
+    Err(err) => {
+      return (
+        StatusCode::BAD_REQUEST,
+        axum::Json(serde_json::json!({ "ok": false, "error": format!("Bad JSON: {err}") })),
+      )
+        .into_response()
+    }
   };
   if value.get("encrypted_data").is_some() {
-    return (StatusCode::BAD_REQUEST, axum::Json(serde_json::json!({ "ok": false, "error": "encrypted_data not supported" }))).into_response();
+    return (
+      StatusCode::BAD_REQUEST,
+      axum::Json(serde_json::json!({ "ok": false, "error": "encrypted_data not supported" })),
+    )
+      .into_response();
   }
   let (provider, model) = match pick_provider_and_model_for_simple(&cfg, &headers, &value) {
     Ok(v) => v,
-    Err(err) => return (StatusCode::BAD_REQUEST, axum::Json(serde_json::json!({ "ok": false, "error": format!("{err}") }))).into_response(),
+    Err(err) => {
+      return (
+        StatusCode::BAD_REQUEST,
+        axum::Json(serde_json::json!({ "ok": false, "error": format!("{err}") })),
+      )
+        .into_response()
+    }
   };
   let system = build_system_text(&value);
   let user = build_user_text(&value);
   let text = match provider_complete_text(&state, provider, &model, &system, &user).await {
     Ok(v) => v,
-    Err(err) => return (StatusCode::BAD_GATEWAY, axum::Json(serde_json::json!({ "ok": false, "error": format!("{err}") }))).into_response(),
+    Err(err) => {
+      return (
+        StatusCode::BAD_GATEWAY,
+        axum::Json(serde_json::json!({ "ok": false, "error": format!("{err}") })),
+      )
+        .into_response()
+    }
   };
-  let out = serde_json::json!({ "text": text, "unknown_blob_names": [], "checkpoint_not_found": false });
+  let out =
+    serde_json::json!({ "text": text, "unknown_blob_names": [], "checkpoint_not_found": false });
   (StatusCode::OK, axum::Json(out)).into_response()
 }
 
@@ -1433,7 +1706,15 @@ async fn generate_conversation_title(
   body: Bytes,
 ) -> Response<Body> {
   let cfg = state.cfg.read().await.clone();
-  byok_text_stream_endpoint(state, cfg, headers, body, false, "/generate-conversation-title").await
+  byok_text_stream_endpoint(
+    state,
+    cfg,
+    headers,
+    body,
+    false,
+    "/generate-conversation-title",
+  )
+  .await
 }
 
 async fn get_models(
@@ -1830,6 +2111,7 @@ async fn proxy_fallback(State(state): State<AppState>, req: Request<Body>) -> Re
       return resp;
     }
   };
+  maybe_delete_history_summary_cache_on_thread_delete(&state, &parts.uri, &body_bytes).await;
   forward_to_official(
     &state,
     &cfg,
@@ -1840,6 +2122,61 @@ async fn proxy_fallback(State(state): State<AppState>, req: Request<Body>) -> Re
     Duration::from_secs(120),
   )
   .await
+}
+
+async fn maybe_delete_history_summary_cache_on_thread_delete(
+  state: &AppState,
+  uri: &axum::http::Uri,
+  body_bytes: &Bytes,
+) {
+  let path = uri.path().to_ascii_lowercase();
+  if !path.contains("delete") && !path.contains("remove") && !path.contains("archive") {
+    return;
+  }
+
+  let Ok(v) = serde_json::from_slice::<serde_json::Value>(body_bytes) else {
+    return;
+  };
+  let cid = v
+    .get("conversation_id")
+    .and_then(|x| x.as_str())
+    .or_else(|| v.get("conversationId").and_then(|x| x.as_str()))
+    .or_else(|| v.get("conversationID").and_then(|x| x.as_str()))
+    .map(str::trim)
+    .filter(|s| !s.is_empty());
+  let Some(cid) = cid else {
+    return;
+  };
+
+  let (deleted, snapshot) = {
+    let mut guard = state.history_summary_cache.write().await;
+    let deleted = guard.remove_conversation(cid);
+    let snapshot = if deleted { Some(guard.clone()) } else { None };
+    (deleted, snapshot)
+  };
+  if !deleted {
+    return;
+  }
+
+  let Some(snapshot) = snapshot else {
+    return;
+  };
+  if let Err(err) = snapshot
+    .save_to_file(state.history_summary_cache_path.as_path())
+    .await
+  {
+    warn!(
+      error=%err,
+      conversation_id=%cid,
+      cache_path=%state.history_summary_cache_path.display(),
+      "history_summary cache 删除后持久化失败（已忽略）"
+    );
+  } else {
+    info!(
+      conversation_id=%cid,
+      "history_summary cache 已随删除请求清理"
+    );
+  }
 }
 
 fn convert_event_to_chunks(

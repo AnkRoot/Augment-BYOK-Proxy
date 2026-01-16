@@ -47,7 +47,13 @@ pub fn is_false(v: &bool) -> bool {
 
 #[derive(Debug, Deserialize)]
 pub struct AugmentRequest {
-  #[serde(default, alias = "modelId", alias = "model_id", alias = "modelName", alias = "model_name")]
+  #[serde(
+    default,
+    alias = "modelId",
+    alias = "model_id",
+    alias = "modelName",
+    alias = "model_name"
+  )]
   pub model: Option<String>,
   #[serde(
     default,
@@ -55,16 +61,34 @@ pub struct AugmentRequest {
     alias = "chatHistory"
   )]
   pub chat_history: Vec<AugmentChatHistory>,
-  #[serde(default, deserialize_with = "de_null_as_default", alias = "text", alias = "requestMessage", alias = "request_message")]
+  #[serde(
+    default,
+    deserialize_with = "de_null_as_default",
+    alias = "text",
+    alias = "requestMessage",
+    alias = "request_message"
+  )]
   pub message: String,
   #[serde(default, deserialize_with = "de_null_as_default")]
   #[serde(alias = "agentMemories")]
   pub agent_memories: String,
-  #[serde(default, deserialize_with = "de_null_as_default", alias = "chatModeOverride", alias = "chat_mode_override")]
+  #[serde(
+    default,
+    deserialize_with = "de_null_as_default",
+    alias = "chatModeOverride",
+    alias = "chat_mode_override"
+  )]
   pub mode: String,
   #[serde(default, deserialize_with = "de_null_as_default")]
   pub prefix: String,
-  #[serde(default, deserialize_with = "de_null_as_default", alias = "selectedCode", alias = "selected_code", alias = "selectedText", alias = "selected_text")]
+  #[serde(
+    default,
+    deserialize_with = "de_null_as_default",
+    alias = "selectedCode",
+    alias = "selected_code",
+    alias = "selectedText",
+    alias = "selected_text"
+  )]
   pub selected_code: String,
   #[serde(default, deserialize_with = "de_null_as_default")]
   pub suffix: String,
@@ -109,11 +133,23 @@ pub struct AugmentContext {
   pub path: String,
   #[serde(default, deserialize_with = "de_null_as_default")]
   pub prefix: String,
-  #[serde(default, deserialize_with = "de_null_as_default", alias = "selectedCode", alias = "selected_code", alias = "selectedText", alias = "selected_text")]
+  #[serde(
+    default,
+    deserialize_with = "de_null_as_default",
+    alias = "selectedCode",
+    alias = "selected_code",
+    alias = "selectedText",
+    alias = "selected_text"
+  )]
   pub selected_code: String,
   #[serde(default, deserialize_with = "de_null_as_default")]
   pub suffix: String,
-  #[serde(default, deserialize_with = "de_null_as_default", alias = "language", alias = "Language")]
+  #[serde(
+    default,
+    deserialize_with = "de_null_as_default",
+    alias = "language",
+    alias = "Language"
+  )]
   pub lang: String,
   #[serde(default, deserialize_with = "de_null_as_default")]
   pub diff: String,

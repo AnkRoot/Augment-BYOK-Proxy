@@ -51,50 +51,16 @@ byok:
 history_summary:
   # 代理侧“自动上下文压缩/摘要”（结合 Augment 的 Summary 模板 + 专用摘要模型）
   # - enabled=false 时完全不生效
-  # - enabled=true 时会在 chat_history 过大时额外调用一次“专用摘要模型”生成 summary_text
+  # - enabled=true 时会在 chat_history 过大/接近上限时额外调用一次摘要模型生成 summary_text，并裁剪发送给上游的上下文
+  #
+  # 说明：
+  # - 摘要缓存会持久化到 `history_summary_cache.json`（默认与 config.yaml 同目录）
+  # - 默认 `cache_ttl_ms=0` 表示永不过期（仅在 thread 删除/手动清理时删除）
   enabled: false
-  # VSIX 侧“客户端预压缩”（更彻底：在发给 proxy 之前先把 chat_history 压成 summary+tail，避免全量 history 传输）
-  # - false：仅由 proxy 侧压缩（client 仍发全量 chat_history）
-  # - true：注入版 VSIX 会读取 /admin/api/config 并按同一套阈值做 client-side compaction（需要安装注入版 VSIX）
-  client_compaction_enabled: false
-  # 专用摘要模型所在 provider（可选；留空则默认用 byok.active_provider_id / providers[0]）
-  provider_id: "openai"
-  # 专用摘要模型名称（可选；留空则默认用该 provider 的 default_model）
-  model: "gpt-4o-mini"
-  # 摘要调用 max_tokens / 超时
-  max_tokens: 1024
-  timeout_seconds: 60
-  # 触发策略：
-  # - auto：优先按“上下文百分比”触发（需能推断/配置主对话模型 context window），否则回退为字符阈值
-  # - chars：仅按字符阈值触发（与官方近似）
-  # - ratio：仅按上下文百分比触发（无法推断 context window 时会回退为 chars）
-  trigger_strategy: "auto"
-  # 上下文百分比触发阈值/目标阈值：超过 trigger 会触发压缩；压缩会尽量收敛到 target（保留 min_tail_exchanges 前提下）
-  trigger_on_context_ratio: 0.70
-  target_context_ratio: 0.55
-  # 主对话模型的 context window（tokens）：0 表示未知；建议在服务端部署时按你的主模型族设置
-  # 例：OpenAI 常见 128000；Anthropic 常见 200000；Gemini 2.5 Pro 常见 1000000
-  context_window_tokens_default: 0
-  # 针对不同主对话模型的覆盖（key 为匹配子串；优先级高于 default）
-  context_window_tokens_overrides:
-    "gemini-2.5-pro": 1000000
-    "claude-": 200000
-    "gpt-4o": 128000
-  # 触发阈值（字符估算，参考官方 dK≈800000）：超过后对旧 history 做摘要并裁剪
-  trigger_on_history_size_chars: 800000
-  # 尾部保留预算（避免切断近期上下文/工具链）：最后这段不参与摘要，仍以原始 exchange 形式保留
-  history_tail_size_chars_to_exclude: 250000
-  # 尾部至少保留多少个 exchange（建议 >=2，避免 tool_result 孤儿）
-  min_tail_exchanges: 2
-  # 代理侧摘要缓存（按 conversation_id 记忆同一边界的 summary_text，减少重复调用）
-  cache_ttl_ms: 1800000
-  # 摘要输入最大长度（防止摘要模型被超长输入拖垮）
-  max_summarization_input_chars: 250000
-  # 滚动摘要：首次全量摘要，后续只对“新增片段”做增量更新（降低摘要调用成本）
-  rolling_summary: true
-  # 摘要 prompt：默认内置 Codex 风格；如需更强约束可在此覆盖
-  # prompt: |
-  #   ...
+  # 摘要模型所在 provider / model（可选；留空则自动使用当前对话的 provider + model）
+  provider_id: ""
+  model: ""
+  cache_ttl_ms: 0
 
 logging:
   # tracing filter（tracing_subscriber EnvFilter 语法），默认 info

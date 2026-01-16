@@ -34,7 +34,8 @@
   - 主面板 Model Picker 的候选模型来自本代理 `/get-models` 注入的 `byok:<providerId>:<modelId>`。
   - `/chat-stream` 会解析请求体 `model` 的 byok 格式，锁定 provider + modelId；若未指定则使用 `byok.active_provider_id/byok.providers[0]` 的 `default_model`。
 - 请求兼容：支持 `chat_history` 还原上下文；支持工具调用（`tool_use/tool_result` 串联）；输入 nodes 支持 `type=0` text、`type=1` tool_result（支持 `content_nodes` 文本/图片）、`type=2` image(base64)，以及 `type=3..10`（会转为提示文本）。
-- 上下文压缩（可选）：`history_summary.enabled=true` 时，代理会在 `chat_history` 接近上下文上限时自动触发（`trigger_strategy=auto|chars|ratio`），用 `history_summary.provider_id/model` 专用摘要模型做滚动摘要（`rolling_summary=true` 时增量更新；两者留空则默认用 active provider + default_model），并把旧 history 压成一段 `<supervisor>...` 总结后裁剪（client 无感；会增加一次上游调用延迟；依赖请求体 `conversationId` 做缓存复用）。如需连「client→proxy」也不再传全量 history，可在注入版 VSIX 上开启 `history_summary.client_compaction_enabled=true`。
+- 上下文压缩（可选）：`history_summary.enabled=true` 时，代理会在 `chat_history` 接近上下文上限时自动触发（`trigger_strategy=auto|chars|ratio`），用摘要模型做滚动摘要（`rolling_summary=true` 时增量更新；`provider_id/model` 留空则默认用当前对话的 provider + model），并把旧 history 压成一段新的 `<supervisor>...`（summary + abridged + full tail）后裁剪 `chat_history`（client/UI 无感；会增加一次上游调用延迟；依赖请求体 `conversation_id` 做缓存复用；缓存持久化到 `history_summary_cache.json`，默认 `cache_ttl_ms=0` 不自动过期）。
+- 摘要缓存清理：当转发请求的路径包含 `delete/remove/archive` 且请求体包含 `conversation_id` 时，会尝试自动删除该 thread 的摘要缓存；也可用管理台 API 手动清理。
 - 请求解析：显式 `null` 的字符串字段按缺省值处理；解析失败错误会附带 JSON 字段路径（便于定位是哪一个字段触发 `null → string`）。
 - 日志：`logging.filter` 控制过滤；`logging.dump_chat_stream_body=true` 输出已脱敏请求摘要（不截断；仍可能包含代码片段）；请求解析失败时会额外输出该摘要用于排查。
 - 扩展隐藏配置 `augment.advanced.chat.override.*` 仅进入请求体 `third_party_override`（不会直接改变请求 URL）。
@@ -60,6 +61,8 @@
 | GET | `/admin/api/config` | 读取当前运行时配置（JSON） |
 | PUT | `/admin/api/config` | 热更新运行时配置（JSON；不支持改监听地址/端口/日志 filter） |
 | POST | `/admin/api/config/save` | 保存当前配置到启动时的 `config.yaml` |
+| POST | `/admin/api/history-summary-cache/delete` | 删除指定 `conversation_id` 的摘要缓存（持久化） |
+| POST | `/admin/api/history-summary-cache/clear` | 清空全部摘要缓存（持久化） |
 
 ## 管理台（可选）
 
@@ -87,7 +90,13 @@
 
 ## VSIX Patch（可选）
 
-目标：对官方 `augment.vscode-augment` 做最小注入，提供一个面板入口（命令）用于打开 `/admin`、刷新模型列表、配置端点路由；代理本身通过 `completionURL/apiToken` 接入，不再使用 `chatStreamForward`。
+目标：对官方 `augment.vscode-augment` 做最小注入，提供一个面板入口（命令）用于：
+- 打开 `/admin`
+- 刷新模型列表（用于 Model Picker / 路由下拉）
+- 配置端点路由（BYOK/Official/Disabled）
+- 配置上下文压缩（History Summary：启用/选择摘要模型/清空摘要缓存/保存到 `config.yaml`）
+
+代理本身通过 `completionURL/apiToken` 接入，不再使用 `chatStreamForward`。
 
 - 文件：`vsix-patch/inject-code.txt`（可选：其它注入逻辑）、`vsix-patch/byok-proxy-auth-header-inject.js`（为 completionURL 自动注入 Authorization）、`vsix-patch/byok-proxy-panel-inject.js`（注册面板命令）。
 - CI：`.github/workflows/manual-build.yml`（下载官方 VSIX→注入→重打包）、`.github/workflows/build.yml`（定时构建）。

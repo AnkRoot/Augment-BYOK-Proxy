@@ -48,4 +48,3 @@ pub fn join_url(base_url: &str, endpoint: &str) -> anyhow::Result<String> {
   let _ = url::Url::parse(&url)?;
   Ok(url)
 }
-

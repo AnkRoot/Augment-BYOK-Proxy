@@ -74,7 +74,10 @@ fn normalize_joined_lines(lines: impl IntoIterator<Item = String>) -> String {
   out
 }
 
-fn extract_user_message_from_request_nodes(nodes: &[NodeIn], fallback_request_message: &str) -> String {
+fn extract_user_message_from_request_nodes(
+  nodes: &[NodeIn],
+  fallback_request_message: &str,
+) -> String {
   let joined = normalize_joined_lines(nodes.iter().filter_map(|n| {
     if n.node_type == REQUEST_NODE_TEXT {
       n.text_node.as_ref().map(|t| t.content.clone())
@@ -90,7 +93,8 @@ fn extract_user_message_from_request_nodes(nodes: &[NodeIn], fallback_request_me
 }
 
 fn build_exchange_render_ctx(ex: &HistoryEndExchange) -> ExchangeRenderCtx {
-  let user_message = extract_user_message_from_request_nodes(&ex.request_nodes, &ex.request_message);
+  let user_message =
+    extract_user_message_from_request_nodes(&ex.request_nodes, &ex.request_message);
 
   let tool_results: Vec<ToolResultCtx> = ex
     .request_nodes
@@ -224,7 +228,10 @@ fn replace_placeholders(mut template: String, repl: &[(&str, String)]) -> String
   template
 }
 
-pub fn render_history_summary_node_value(v: &Value, extra_tool_results: &[NodeIn]) -> Option<String> {
+pub fn render_history_summary_node_value(
+  v: &Value,
+  extra_tool_results: &[NodeIn],
+) -> Option<String> {
   let mut node: HistorySummaryNode = serde_json::from_value(v.clone()).ok()?;
   if node.message_template.trim().is_empty() {
     return None;
@@ -259,8 +266,6 @@ pub fn render_history_summary_node_value(v: &Value, extra_tool_results: &[NodeIn
       ),
       ("{middle_part_abridged}", abridged.clone()),
       ("{end_part_full}", end_part_full),
-      // 兼容旧模板字段名
-      ("{abridged_history}", abridged),
     ],
   );
 
@@ -316,7 +321,9 @@ pub fn compact_chat_history(chat_history: &mut Vec<AugmentChatHistory>) {
 
   let mut other_nodes: Vec<NodeIn> = req_nodes
     .into_iter()
-    .filter(|n| n.node_type != REQUEST_NODE_HISTORY_SUMMARY && n.node_type != REQUEST_NODE_TOOL_RESULT)
+    .filter(|n| {
+      n.node_type != REQUEST_NODE_HISTORY_SUMMARY && n.node_type != REQUEST_NODE_TOOL_RESULT
+    })
     .collect();
 
   let summary_text_node = NodeIn {
@@ -478,9 +485,11 @@ Beginning part has {beginning_part_dropped_num_exchanges} exchanges.
 
     assert_eq!(chat_history.len(), 1);
     assert_eq!(chat_history[0].request_nodes.len() >= 1, true);
-    assert_eq!(chat_history[0].request_nodes[0].node_type, REQUEST_NODE_TEXT);
-    let txt = chat_history[0]
-      .request_nodes[0]
+    assert_eq!(
+      chat_history[0].request_nodes[0].node_type,
+      REQUEST_NODE_TEXT
+    );
+    let txt = chat_history[0].request_nodes[0]
       .text_node
       .as_ref()
       .map(|t| t.content.clone())

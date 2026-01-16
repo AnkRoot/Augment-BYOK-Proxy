@@ -110,21 +110,57 @@
   </style>
 </head>
 <body>
-	  <div class="container">
-	    <h2 style="margin:0 0 6px 0">${escapeHtml(TITLE)}</h2>
-	    <div class="muted">仅管理端点路由与模型选择；代理配置请在 <code>/admin</code> 调整。</div>
+		  <div class="container">
+		    <h2 style="margin:0 0 6px 0">${escapeHtml(TITLE)}</h2>
+		    <div class="muted">管理端点路由、模型与上下文压缩；更完整的代理配置可在 <code>/admin</code> 调整。</div>
 
-		    <div class="card">
-		      <div class="cardHeader">
-		        <strong>连接</strong>
-		        <div class="row" style="gap:8px">
+			    <div class="card">
+			      <div class="cardHeader">
+			        <strong>连接</strong>
+			        <div class="row" style="gap:8px">
 		          <span class="badge" id="modelsStatus">models: 0</span>
 		          <button id="refreshModels">刷新模型</button>
 		          <button id="openAdmin" class="primary">打开 /admin</button>
 		          <button id="openSettings">设置</button>
 		        </div>
+			      </div>
+		    </div>
+
+		    <div class="card">
+		      <div class="cardHeader">
+		        <div>
+		          <strong>上下文压缩</strong>
+		          <span class="muted">（History Summary：后台滚动摘要，仅影响发送给模型）</span>
+		        </div>
+		        <div class="row" style="gap:8px">
+		          <button id="refreshHistorySummary">刷新</button>
+		          <button id="applyHistorySummary" class="primary">应用</button>
+		          <button id="saveProxyConfig">保存到 config.yaml</button>
+		          <button id="clearHistorySummaryCache" class="danger">清空摘要缓存</button>
+		        </div>
 		      </div>
-	    </div>
+		      <div class="cardBody">
+		        <div class="grid">
+		          <div>
+		            <label>history_summary.enabled</label>
+		            <div class="row" style="gap:8px">
+		              <input id="hsEnabled" type="checkbox" style="width:auto" />
+		              <span class="muted">启用</span>
+		            </div>
+		            <div class="muted inlineNote">面板/聊天 UI 仍显示完整历史；压缩仅用于发给上游模型。</div>
+		          </div>
+		          <div>
+		            <label>history_summary.model（可选）</label>
+		            <select id="hsModel"></select>
+		            <div class="muted inlineNote">
+		              为空则跟随当前对话模型；候选来自 <code>/get-models</code> 注入的 <code>byok:&lt;providerId&gt;:&lt;modelId&gt;</code>。
+		            </div>
+		          </div>
+		        </div>
+		        <div class="muted inlineNote">提示：缓存按 <code>conversation_id</code> 复用并持久化；删除 thread 时会自动清理对应缓存。</div>
+		        <pre id="hsStatus" style="margin-top:12px">ready</pre>
+		      </div>
+		    </div>
 
 		    <div class="card">
 	      <div class="cardHeader">
@@ -153,12 +189,12 @@
 		    </div>
 		  </div>
 
-		  <script nonce="${nonce}">
-		    const vscode = acquireVsCodeApi();
-		    const $ = (id) => document.getElementById(id);
-		    const normalize = (v) => typeof v === 'string' ? v.trim() : '';
-		    const init = ${initJson};
-		    const state = { rules: {}, endpoints: [], models: [] };
+			  <script nonce="${nonce}">
+			    const vscode = acquireVsCodeApi();
+			    const $ = (id) => document.getElementById(id);
+			    const normalize = (v) => typeof v === 'string' ? v.trim() : '';
+			    const init = ${initJson};
+		    const state = { rules: {}, endpoints: [], models: [], historySummary: { enabled: false, model: '' } };
 
 		    function normalizeEndpoint(ep) {
 	      const s = normalize(ep);
@@ -179,7 +215,7 @@
 	      $('modelsStatus').textContent = 'models: ' + String(n);
 	    }
 
-    function groupModelsByProvider(models) {
+	    function groupModelsByProvider(models) {
       const out = new Map();
       for (const m of Array.isArray(models) ? models : []) {
         const raw = normalize(m);
@@ -196,6 +232,36 @@
       for (const [k, arr] of out.entries()) arr.sort((a, b) => a.modelId.localeCompare(b.modelId));
       return Array.from(out.entries()).sort((a, b) => a[0].localeCompare(b[0]));
     }
+
+	    function setHistorySummaryStatus(v) {
+	      const el = $('hsStatus');
+	      if (!el) return;
+	      const s = (typeof v === 'string') ? v : JSON.stringify(v, null, 2);
+	      el.textContent = s || '';
+	    }
+
+	    function renderHistorySummary() {
+	      const hs = state.historySummary && typeof state.historySummary === 'object' ? state.historySummary : { enabled: false, model: '' };
+	      const enabled = Boolean(hs.enabled);
+	      const model = normalize(hs.model);
+
+	      const cb = $('hsEnabled');
+	      if (cb) cb.checked = enabled;
+
+	      const sel = $('hsModel');
+	      if (sel) {
+	        const modelGroups = groupModelsByProvider(state.models);
+	        sel.innerHTML = '';
+	        sel.appendChild(new Option('(跟随当前对话模型)', ''));
+	        for (const [providerId, items] of modelGroups) {
+	          const og = document.createElement('optgroup');
+	          og.label = providerId;
+	          for (const it of items) og.appendChild(new Option(it.modelId, it.id));
+	          sel.appendChild(og);
+	        }
+	        sel.value = model;
+	      }
+	    }
 
 	    function renderRules() {
       const tbody = $('rulesTbody');
@@ -297,7 +363,7 @@
 	      vscode.postMessage({ type: 'rpc', method: 'clearRouting', params: {} });
     });
 
-	    $('saveRules').addEventListener('click', () => {
+		    $('saveRules').addEventListener('click', () => {
 	      const rules = {};
 	      for (const [k, v] of Object.entries(state.rules || {})) {
 	        const ep = normalizeEndpoint(k);
@@ -314,26 +380,51 @@
 	      vscode.postMessage({ type: 'rpc', method: 'saveRouting', params: { rules } });
 	    });
 
-	    window.addEventListener('message', (ev) => {
-	      const msg = ev && ev.data;
-	      if (!msg || typeof msg !== 'object') return;
-		      if (msg.type === 'state') {
-		        try {
-		          const d = msg.data && typeof msg.data === 'object' ? msg.data : {};
-		          state.rules = (d.rules && typeof d.rules === 'object') ? d.rules : {};
-		          state.endpoints = Array.isArray(d.endpoints) ? d.endpoints.map(normalizeEndpoint).filter(Boolean) : [];
-		          state.models = Array.isArray(d.models) ? d.models.map(normalize).filter(Boolean) : [];
-		          renderModelsStatus();
-		          renderRules();
-		        } catch (e) {
-		          console.error(e);
-		        }
-		      }
-		    });
-		
-		    vscode.postMessage({ type: 'rpc', method: 'getState', params: {} });
-		  </script>
-</body>
+		    window.addEventListener('message', (ev) => {
+		      const msg = ev && ev.data;
+		      if (!msg || typeof msg !== 'object') return;
+			      if (msg.type === 'state') {
+			        try {
+			          const d = msg.data && typeof msg.data === 'object' ? msg.data : {};
+			          state.rules = (d.rules && typeof d.rules === 'object') ? d.rules : {};
+			          state.endpoints = Array.isArray(d.endpoints) ? d.endpoints.map(normalizeEndpoint).filter(Boolean) : [];
+			          state.models = Array.isArray(d.models) ? d.models.map(normalize).filter(Boolean) : [];
+			          state.historySummary = (d.historySummary && typeof d.historySummary === 'object') ? d.historySummary : { enabled: false, model: '' };
+			          if (d.historySummaryStatus != null) setHistorySummaryStatus(d.historySummaryStatus);
+			          renderModelsStatus();
+			          renderHistorySummary();
+			          renderRules();
+			        } catch (e) {
+			          console.error(e);
+			        }
+			      }
+			    });
+
+			    $('refreshHistorySummary').addEventListener('click', () => {
+			      setHistorySummaryStatus('refreshing...');
+			      vscode.postMessage({ type: 'rpc', method: 'refreshHistorySummary', params: {} });
+			    });
+
+			    $('applyHistorySummary').addEventListener('click', () => {
+			      const enabled = Boolean($('hsEnabled') && $('hsEnabled').checked);
+			      const model = normalize($('hsModel') && $('hsModel').value);
+			      setHistorySummaryStatus('applying...');
+			      vscode.postMessage({ type: 'rpc', method: 'applyHistorySummary', params: { enabled, model } });
+			    });
+
+			    $('saveProxyConfig').addEventListener('click', () => {
+			      setHistorySummaryStatus('saving...');
+			      vscode.postMessage({ type: 'rpc', method: 'saveProxyConfig', params: {} });
+			    });
+
+			    $('clearHistorySummaryCache').addEventListener('click', () => {
+			      setHistorySummaryStatus('clearing cache...');
+			      vscode.postMessage({ type: 'rpc', method: 'clearHistorySummaryCache', params: {} });
+			    });
+			
+			    vscode.postMessage({ type: 'rpc', method: 'getState', params: {} });
+			  </script>
+	</body>
 </html>`;
   }
 
@@ -411,6 +502,93 @@
       .filter((m) => m.startsWith("byok:"));
     names.sort();
     return names;
+  }
+
+  function parseByokModelId(raw) {
+    const s = normalizeString(raw);
+    if (!s.startsWith("byok:")) return null;
+    const rest = s.slice("byok:".length);
+    const idx = rest.indexOf(":");
+    if (idx <= 0) return null;
+    const providerId = normalizeString(rest.slice(0, idx));
+    const modelId = normalizeString(rest.slice(idx + 1));
+    if (!providerId || !modelId) return null;
+    return { providerId, modelId };
+  }
+
+  async function fetchProxyConfig({ completionURL }) {
+    const base = normalizeString(completionURL);
+    if (!base) throw new Error("completionURL 为空");
+    const url = joinBaseUrl(base, "admin/api/config");
+    const resp = await fetch(url, { method: "GET" });
+    const text = await resp.text().catch(() => "");
+    if (!resp.ok) throw new Error(`admin/api/config 失败: ${resp.status} ${text.slice(0, 300)}`.trim());
+    const json = text ? JSON.parse(text) : null;
+    if (!json || typeof json !== "object") throw new Error("admin/api/config 响应不是 JSON object");
+    return json;
+  }
+
+  function extractHistorySummaryState(cfg) {
+    const root = cfg && typeof cfg === "object" ? cfg : null;
+    const hs = root && root.history_summary && typeof root.history_summary === "object" ? root.history_summary : null;
+    const enabled = Boolean(hs && hs.enabled);
+    const pid = normalizeString(hs && hs.provider_id);
+    const mid = normalizeString(hs && hs.model);
+    const model = pid && mid ? `byok:${pid}:${mid}` : "";
+    return { enabled, model };
+  }
+
+  async function applyProxyHistorySummary({ completionURL, enabled, model }) {
+    const cfg = await fetchProxyConfig({ completionURL });
+    if (!cfg.history_summary || typeof cfg.history_summary !== "object") cfg.history_summary = {};
+    cfg.history_summary.enabled = Boolean(enabled);
+
+    const parsed = parseByokModelId(model);
+    if (!parsed) {
+      cfg.history_summary.provider_id = "";
+      cfg.history_summary.model = "";
+    } else {
+      cfg.history_summary.provider_id = parsed.providerId;
+      cfg.history_summary.model = parsed.modelId;
+    }
+
+    const url = joinBaseUrl(normalizeString(completionURL), "admin/api/config");
+    const resp = await fetch(url, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(cfg) });
+    const text = await resp.text().catch(() => "");
+    const json = text ? JSON.parse(text) : null;
+    if (!resp.ok) {
+      const msg = json && typeof json === "object" ? (json.error || json.message || text) : text;
+      throw new Error(`应用失败: ${String(msg || resp.status).slice(0, 300)}`.trim());
+    }
+    return json;
+  }
+
+  async function saveProxyConfigToFile({ completionURL }) {
+    const base = normalizeString(completionURL);
+    if (!base) throw new Error("completionURL 为空");
+    const url = joinBaseUrl(base, "admin/api/config/save");
+    const resp = await fetch(url, { method: "POST" });
+    const text = await resp.text().catch(() => "");
+    const json = text ? JSON.parse(text) : null;
+    if (!resp.ok) {
+      const msg = json && typeof json === "object" ? (json.error || json.message || text) : text;
+      throw new Error(`保存失败: ${String(msg || resp.status).slice(0, 300)}`.trim());
+    }
+    return json;
+  }
+
+  async function clearProxyHistorySummaryCacheAll({ completionURL }) {
+    const base = normalizeString(completionURL);
+    if (!base) throw new Error("completionURL 为空");
+    const url = joinBaseUrl(base, "admin/api/history-summary-cache/clear");
+    const resp = await fetch(url, { method: "POST" });
+    const text = await resp.text().catch(() => "");
+    const json = text ? JSON.parse(text) : null;
+    if (!resp.ok) {
+      const msg = json && typeof json === "object" ? (json.error || json.message || text) : text;
+      throw new Error(`清空失败: ${String(msg || resp.status).slice(0, 300)}`.trim());
+    }
+    return json;
   }
 
   function installContextHook() {
@@ -493,7 +671,12 @@
             if (method === "getState") {
               const rules = runtime.routing?.rules && typeof runtime.routing?.rules === "object" ? runtime.routing.rules : {};
               const endpoints = Array.from(new Set([...IMPLEMENTED_ENDPOINTS.map(normalizeEndpoint), ...Object.keys(rules).map(normalizeEndpoint)])).filter(Boolean).sort((a, b) => a.localeCompare(b));
-              panel.webview.postMessage({ type: "state", data: { rules, endpoints, models: runtime.models || [] } });
+              let historySummary = { enabled: false, model: "" };
+              try {
+                const proxyCfg = await fetchProxyConfig({ completionURL });
+                historySummary = extractHistorySummaryState(proxyCfg);
+              } catch (_) { }
+              panel.webview.postMessage({ type: "state", data: { rules, endpoints, models: runtime.models || [], historySummary } });
               return;
             }
             if (method === "openAdmin") {
@@ -520,7 +703,66 @@
               runtime.models = models;
               const rules = runtime.routing?.rules && typeof runtime.routing?.rules === "object" ? runtime.routing.rules : {};
               const endpoints = Array.from(new Set([...IMPLEMENTED_ENDPOINTS.map(normalizeEndpoint), ...Object.keys(rules).map(normalizeEndpoint)])).filter(Boolean).sort((a, b) => a.localeCompare(b));
-              return panel.webview.postMessage({ type: "state", data: { rules, endpoints, models } });
+              let historySummary = { enabled: false, model: "" };
+              try {
+                const proxyCfg = await fetchProxyConfig({ completionURL });
+                historySummary = extractHistorySummaryState(proxyCfg);
+              } catch (_) { }
+              return panel.webview.postMessage({ type: "state", data: { rules, endpoints, models, historySummary } });
+            }
+
+            if (method === "refreshHistorySummary") {
+              const rules = runtime.routing?.rules && typeof runtime.routing?.rules === "object" ? runtime.routing.rules : {};
+              const endpoints = Array.from(new Set([...IMPLEMENTED_ENDPOINTS.map(normalizeEndpoint), ...Object.keys(rules).map(normalizeEndpoint)])).filter(Boolean).sort((a, b) => a.localeCompare(b));
+              const models = runtime.models || [];
+              const proxyCfg = await fetchProxyConfig({ completionURL });
+              const historySummary = extractHistorySummaryState(proxyCfg);
+              return panel.webview.postMessage({ type: "state", data: { rules, endpoints, models, historySummary, historySummaryStatus: { ok: true } } });
+            }
+
+            if (method === "applyHistorySummary") {
+              const enabled = Boolean(params.enabled);
+              const model = normalizeString(params.model);
+              const result = await applyProxyHistorySummary({ completionURL, enabled, model });
+              try { vscode.window.showInformationMessage("History Summary 已应用到 Proxy（热更新）"); } catch (_) { }
+
+              const rules = runtime.routing?.rules && typeof runtime.routing?.rules === "object" ? runtime.routing.rules : {};
+              const endpoints = Array.from(new Set([...IMPLEMENTED_ENDPOINTS.map(normalizeEndpoint), ...Object.keys(rules).map(normalizeEndpoint)])).filter(Boolean).sort((a, b) => a.localeCompare(b));
+              const models = runtime.models || [];
+              let historySummary = { enabled: false, model: "" };
+              try {
+                const proxyCfg = await fetchProxyConfig({ completionURL });
+                historySummary = extractHistorySummaryState(proxyCfg);
+              } catch (_) { }
+              return panel.webview.postMessage({ type: "state", data: { rules, endpoints, models, historySummary, historySummaryStatus: result || { ok: true } } });
+            }
+
+            if (method === "saveProxyConfig") {
+              const result = await saveProxyConfigToFile({ completionURL });
+              try { vscode.window.showInformationMessage("Proxy 配置已保存到 config.yaml"); } catch (_) { }
+              const rules = runtime.routing?.rules && typeof runtime.routing?.rules === "object" ? runtime.routing.rules : {};
+              const endpoints = Array.from(new Set([...IMPLEMENTED_ENDPOINTS.map(normalizeEndpoint), ...Object.keys(rules).map(normalizeEndpoint)])).filter(Boolean).sort((a, b) => a.localeCompare(b));
+              const models = runtime.models || [];
+              let historySummary = { enabled: false, model: "" };
+              try {
+                const proxyCfg = await fetchProxyConfig({ completionURL });
+                historySummary = extractHistorySummaryState(proxyCfg);
+              } catch (_) { }
+              return panel.webview.postMessage({ type: "state", data: { rules, endpoints, models, historySummary, historySummaryStatus: result || { ok: true } } });
+            }
+
+            if (method === "clearHistorySummaryCache") {
+              const result = await clearProxyHistorySummaryCacheAll({ completionURL });
+              try { vscode.window.showInformationMessage("History Summary 缓存已清空"); } catch (_) { }
+              const rules = runtime.routing?.rules && typeof runtime.routing?.rules === "object" ? runtime.routing.rules : {};
+              const endpoints = Array.from(new Set([...IMPLEMENTED_ENDPOINTS.map(normalizeEndpoint), ...Object.keys(rules).map(normalizeEndpoint)])).filter(Boolean).sort((a, b) => a.localeCompare(b));
+              const models = runtime.models || [];
+              let historySummary = { enabled: false, model: "" };
+              try {
+                const proxyCfg = await fetchProxyConfig({ completionURL });
+                historySummary = extractHistorySummaryState(proxyCfg);
+              } catch (_) { }
+              return panel.webview.postMessage({ type: "state", data: { rules, endpoints, models, historySummary, historySummaryStatus: result || { ok: true } } });
             }
           } catch (e) {
             try { vscode.window.showErrorMessage(`BYOK Proxy: ${String(e && e.message ? e.message : e)}`); } catch (_) { }
